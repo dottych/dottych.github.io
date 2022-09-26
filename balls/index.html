@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Balls Online</title>
+        <style>
+            body {
+                text-align: center;
+                margin-left: auto;
+                margin-right: auto;
+                background-color: #444444;
+                color: white;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                overflow-x: hidden;
+                overflow-y: hidden;
+            }
+        </style>
+    </head>
+    <body>
+        <form id="form"><input id="message" maxlength="64" autocomplete="off"> <button>Send</button></form>
+        <canvas id="canvas" width="1280" height="720"></canvas>
+
+        <script defer>
+            let address = "2.tcp.eu.ngrok.io:19285";
+
+            let canvas = document.getElementById("canvas");
+            let ctx = canvas.getContext("2d");
+
+            let form = document.getElementById('form');
+            let text = document.getElementById('message');
+
+            form.addEventListener('submit', e => {
+                e.preventDefault();
+                if (text.value) {
+                    let message = text.value;
+                    if (message !== null) {
+                        if (message.length > 64) {
+                            message.slice(0, 64);
+                        }
+                        ws.send(JSON.stringify(['message', message.slice(0, 64).toString()]));
+                        text.value = '';
+                    }
+                }
+            });
+
+            ctx.font = "bold 16px Calibri";
+
+            const ws = new WebSocket(`ws://${address}`);
+            const balls = {
+                keys: {
+                    left: 37,
+                    up: 38,
+                    right: 39,
+                    down: 40,
+                },
+
+                keyboard: {},
+
+                hex: [..."abcdef0123456789"],
+
+                now: performance.now(),
+                stime: 0,
+
+                version: "",
+
+                ping: 0,
+                pingAttempts: 0,
+                awaitingPong: false,
+
+                fps: 60,
+                maxFps: 60,
+
+                randomNumber: () => { return Math.floor(Math.sin(Math.cos(Math.PI) * performance.now() * Math.tan(performance.now())) * 100 + 100) },
+                randomHex: () => { return balls.hex[Math.floor(Math.random() * balls.hex.length)] },
+                randomHex2: () => { return balls.hex[balls.randomNumber() % balls.hex.length] },
+
+                drawText: (text, x, y, color = 'white') => {
+                    ctx.fillStyle = "black";
+                    ctx.fillText(text, x + 1, y + 1);
+                    ctx.fillStyle = color;
+                    ctx.fillText(text, x, y);
+                },
+
+                players: {},
+                cid: "",
+
+                prevX: 0,
+                prevY: 0,
+                speed: 4,
+
+                map: [],
+
+                messages: [],
+                lastMessageColor: 0,
+
+                addPlayer: (_id, _x, _y) => {
+                    balls.players[_id] = {x: _x, y: _y, prevX: 0, prevY: 0};
+                },
+
+                removePlayer: _id => {
+                    delete balls.players[_id];
+                },
+
+                addMessage: (id, msg) => {
+                    balls.messages.push(`${id}: ${msg}`);
+                    if (balls.messages.length > 5) balls.messages.shift();
+                },
+
+                interpolate: (start, end, amount) => {
+                    return Math.floor(start + ((amount/8) * (end-start)));
+                },
+
+                draw: () => {
+                    requestAnimationFrame(balls.draw);
+
+                    if (balls.now + (1000 / balls.maxFps) < performance.now()) {
+                        balls.now = performance.now();
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        ctx.fillStyle = `gray`;
+                        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                        ctx.fillStyle = '#AAAAAA';
+                        if (balls.map[8] !== undefined) {
+                            for (let i = 0; i < 16; i++) {
+                                for (let j = 0; j < 9; j++) {
+                                    if (balls.map[j][i] == 1) ctx.fillRect(i * 80, j * 80, 80, 80);
+                                }
+                            }
+                        }
+
+                        ctx.textAlign = 'center';
+                        for (let i = 0; i < Object.keys(balls.players).length; i++) {
+                            let player = balls.players[Object.keys(balls.players)[i]];
+
+                            // Color the client player
+                            if (Object.keys(balls.players)[i] != balls.cid) ctx.fillStyle = '#FF6969'; else ctx.fillStyle = '#3369FF';
+
+                            // Interpolate other players
+                            if (Object.keys(balls.players) != balls.cid) {
+                                let animX = balls.interpolate(player.prevX, player.x, 4); // 0.5   Math.abs(player.x - player.prevX)
+                                let animY = balls.interpolate(player.prevY, player.y, 4);
+
+                                player.prevX = player.x;
+                                player.prevY = player.y;
+                                
+                                ctx.fillRect(animX, animY, 16, 16);
+                                balls.drawText(Object.keys(balls.players)[i], animX + 8, animY - 16);
+                            } else {
+                                ctx.fillRect(player.x, player.y, 16, 16);
+                                balls.drawText(Object.keys(balls.players)[i], player.x + 8, player.y - 16);
+                            }
+                            
+                        }
+
+                        [balls.prevX, balls.prevY] = [(balls.players[balls.cid] === undefined) ? 0 : balls.players[balls.cid].x, (balls.players[balls.cid] === undefined) ? 0 : balls.players[balls.cid].y];
+
+                        // Math.floor((balls.players[balls.cid].x + 16) / 80)
+
+                        let newX = newY = direction = 0;
+                        //let speed = ((balls.fps < 0) ? 1 : balls.fps) / balls.speed;  // fps speed
+                        let speed = balls.speed;
+                        //console.log(speed);
+                        if (balls.keyboard[balls.keys.left]) { newX = -speed; direction = 3; };
+                        if (balls.keyboard[balls.keys.right]) { newX = speed; direction = 1; };
+                        if (balls.keyboard[balls.keys.up]) { newY = -speed; direction = 0; };
+                        if (balls.keyboard[balls.keys.down]) { newY = speed; direction = 2; };
+
+                        try {
+                            let gridX = gridY = 0;
+                            
+                            switch (direction) {
+                                case 0:
+                                    gridX = Math.floor((balls.players[balls.cid].x + ((newX == Math.abs(newX)) ? 16 : 0)) / 80);
+                                    gridY = Math.floor((balls.players[balls.cid].y) / 80);
+                                    break;
+                                case 1:
+                                    gridX = Math.floor((balls.players[balls.cid].x + 16) / 80);
+                                    gridY = Math.floor((balls.players[balls.cid].y + ((newY == Math.abs(newY)) ? 16 : 0)) / 80);
+                                    break;
+                                case 2:
+                                    gridX = Math.floor((balls.players[balls.cid].x + ((newX == Math.abs(newX)) ? 16 : 0)) / 80);
+                                    gridY = Math.floor((balls.players[balls.cid].y + 16) / 80);
+                                    break;
+                                case 3:
+                                    gridX = Math.floor((balls.players[balls.cid].x) / 80);
+                                    gridY = Math.floor((balls.players[balls.cid].y + ((newY == Math.abs(newY)) ? 16 : 0)) / 80);
+                                    break;
+                            }
+                            gridX = gridY = 0;
+                            //console.log(balls.map[gridY][gridX], gridX, gridY);
+                            if (balls.players[balls.cid].x + newX > 0 && balls.players[balls.cid].x + newX < 1280 - 16 && balls.map[gridY][gridX] == 0) balls.players[balls.cid].x += newX;
+                            if (balls.players[balls.cid].y + newY > 0 && balls.players[balls.cid].y + newY < 720 - 16 && balls.map[gridY][gridX] == 0) balls.players[balls.cid].y += newY;
+                        } catch (e) {
+
+                        }
+                        
+
+                        ctx.textAlign = 'left';
+                        //while (performance.now() - balls.now < (1 / balls.maxFps) * 1000) {}
+                        balls.drawText(`Balls Online`, 16, 16 * 1, '#EEEEEE');
+                        balls.drawText(`FPS: ${balls.fps}`, 16, 16 * 2, (balls.fps < 30) ? (balls.fps < 15) ? 'red' : 'yellow' : 'lime');
+                        balls.drawText(`Ping: ${balls.ping}ms`, 16, 16 * 3, (balls.ping > 100) ? (balls.ping > 250) ? "red" : 'yellow' : 'lime');
+                        balls.drawText(`Status: ${(ws.readyState == 0 || ws.readyState == 3) ? "offline" : "online"}`, 16, 16 * 4, (ws.readyState == 0 || ws.readyState == 3) ? "red" : 'lime');
+                        balls.drawText(`Client run: ${Math.floor(balls.now / 1000)}s`, 16, 16 * 6, '#AAAAFF');
+                        balls.drawText(`Server run: ${Math.floor((balls.stime + balls.now) / 1000)}s`, 16, 16 * 7, '#AAAAFF');
+
+                        balls.drawText(`Version: ${balls.version}`, 16, 16 * 9, '#AAAAFF');
+
+                        balls.drawText(`Info`, 16 * 12, 16 * 1, '#EEEEEE');
+                        balls.drawText(`Client ID: ${balls.cid}`, 16 * 12, 16 * 2, '#DDDDDD');
+                        balls.drawText(`Client X: ${Math.floor((balls.players[balls.cid] === undefined) ? 0 : balls.players[balls.cid].x)}`, 16 * 12, 16 * 3, '#DDDDDD');
+                        balls.drawText(`Client Y: ${Math.floor((balls.players[balls.cid] === undefined) ? 0 : balls.players[balls.cid].y)}`, 16 * 12, 16 * 4, '#DDDDDD');
+
+                        balls.drawText(`Players: ${Object.keys(balls.players).length}`, 16 * 12, 16 * 6, '#DDDDDD');
+
+                        balls.drawText(`Chat`, 16 * 24, 16 * 1, '#EEEEEE');
+                        for (let i = 0; i < balls.messages.length; i++) {
+                            balls.drawText(balls.messages[i], 16 * 24, 16 * (i + 2), (i == balls.messages.length - 1) ? `#DDDD${((balls.lastMessageColor).toString(16).length == 1) ? '0' + (balls.lastMessageColor).toString(16) : (balls.lastMessageColor).toString(16)}` : "#DDDDDD");
+                            if (balls.lastMessageColor < 221) balls.lastMessageColor++;
+                        }
+
+                        balls.drawText(`Player list`, 16, 16 * 12, '#EEEEEE');
+                        for (let i = 0; i < Object.keys(balls.players).length; i++) {
+                            let player = balls.players[Object.keys(balls.players)[i]];
+
+                            balls.drawText(`${Object.keys(balls.players)[i]} - ${player.x}, ${player.y}`, 16, 16 * 12 + (16 * (i + 1)), "#DDDDDD");
+                        }
+                        
+                    }
+                    balls.fps = Math.ceil(1000 / (performance.now() - balls.now));
+                },
+            }
+
+            ws.addEventListener('open', () => {
+                console.log("Connected to server");
+                //ws.send("test");
+            });
+
+            ws.addEventListener('message', msg => {
+                //console.log(JSON.parse(msg.data));
+                let data = JSON.parse(msg.data);
+                switch (data[0]) {
+                    case "id":
+                        balls.cid = data[1];
+                        break;
+
+                    case "time":
+                        balls.stime = data[1];
+                        break;
+
+                    case "spawn":
+                        balls.addPlayer(data[1], data[2], data[3]);
+                        break;
+
+                    case "despawn":
+                        balls.removePlayer(data[1]);
+                        break;
+
+                    case "move":
+                        //if (data[1] != balls.cid) {
+                            //balls.players[data[1]].prevX = balls.players[data[1]].x;
+                            //balls.players[data[1]].prevY = balls.players[data[1]].y;
+                            balls.players[data[1]].x = data[2];
+                            balls.players[data[1]].y = data[3];
+                            /*balls.players[data[1]].x = balls.interpolate(prevX, data[2], 0.5);
+                            balls.players[data[1]].y = balls.interpolate(prevY, data[3], 0.5);*/
+                        //}
+                        break;
+
+                    case "ping":
+                        balls.awaitingPong = false;
+                        balls.pingAttempts = 0;
+                        balls.ping = Date.now() - data[1];
+                        break;
+                    
+                    case "version":
+                        balls.version = data[1];
+                        break;
+
+                    case "map":
+                        balls.map = data[1];
+                        break;
+
+                    case "message":
+                        balls.addMessage(data[1], data[2]);
+                        balls.lastMessageColor = 0;
+                        break;
+                }
+            });
+
+            window.addEventListener("keydown", e => { balls.keyboard[e.keyCode] = true; });
+            window.addEventListener("keyup", e => { balls.keyboard[e.keyCode] = false; });
+
+            setInterval(() => {
+                try {
+                    if (ws.readyState != WebSocket.CLOSED && (balls.prevX != balls.players[balls.cid].x || balls.prevY != balls.players[balls.cid].y)) {
+                        ws.send(JSON.stringify(["move", balls.players[balls.cid].x, balls.players[balls.cid].y]));
+                    }
+                } catch (e) {
+                    //console.log("Not connected");
+                }
+                
+            }, 50);
+
+            setInterval(() => {
+                if (ws.readyState != WebSocket.CLOSED) {
+                    if (!balls.awaitingPong) {
+                        ws.send(JSON.stringify(["ping"]));
+                        balls.awaitingPong = true;
+                        balls.pingAttempts++;
+                    } else {
+                        if (balls.pingAttempts > 5) {
+                            ws.close();
+                            ws.readyState = 0;
+                        }
+                    }
+                }
+            }, 1000);
+
+            balls.draw();
+        </script>
+    </body>
+</html>
